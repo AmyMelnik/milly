@@ -7,7 +7,7 @@ struct WizardView: View {
     let onFinished: (UUID) -> Void
 
     enum Step: Int, CaseIterable {
-        case meals, diet, hunger, base, color, time, avoid, wishes, review
+        case meals, diet, hunger, base, color, time, avoid, wishes, kitchen, review
     }
 
     enum Phase: Equatable {
@@ -19,6 +19,9 @@ struct WizardView: View {
     @State private var draft = Preferences()
     @State private var phase: Phase = .asking
     @State private var loaded = false
+    /// Zero-waste mode: nil until the cook answers, then whether they want to add photos.
+    @State private var useKitchen: Bool?
+    @State private var photos: [KitchenPhoto] = []
 
     var body: some View {
         ZStack {
@@ -39,7 +42,12 @@ struct WizardView: View {
         .onAppear {
             guard !loaded else { return }
             draft = store.preferences
+            draft.applyDietRules()
             loaded = true
+        }
+        // Earlier answers narrow the later steps: a vegetarian isn't asked to leave out meat again.
+        .onChange(of: draft.diet) {
+            withAnimation(.easeOut(duration: 0.15)) { draft.applyDietRules() }
         }
     }
 
@@ -101,6 +109,7 @@ struct WizardView: View {
         case .review: "Make my plan"
         case .avoid: draft.avoidTags.isEmpty && draft.avoid.isEmpty ? "Nothing to leave out" : "Next"
         case .wishes: draft.wishTags.isEmpty && draft.notes.isEmpty ? "Skip" : "Next"
+        case .kitchen: useKitchen == true && !photos.isEmpty ? "Next" : "Skip this round"
         default: "Next"
         }
     }
@@ -112,15 +121,31 @@ struct WizardView: View {
 
     private func generate() {
         store.preferences = draft
+        let photoCount = useKitchen == true ? photos.count : 0
+        // Set before the screen switches, so the very first frame already shows the right step.
+        store.progress = .starting(withPhotos: photoCount)
         withAnimation { phase = .generating }
         Task {
             do {
-                let id = try await store.generate()
+                let id = try await store.generate(photos: useKitchen == true ? photos.map(\.jpeg) : [])
                 onFinished(id)
             } catch {
                 withAnimation { phase = .failed(error.localizedDescription) }
             }
         }
+    }
+
+    private var baseSubtitle: String {
+        draft.diet == "Low carb"
+            ? "How many proteins and carbs should you cook? Low carb keeps it to two carbs at most, or none."
+            : "How many different proteins and carbs should you cook?"
+    }
+
+    /// "pork, beef and fish"
+    static func list(_ items: [String]) -> String {
+        let lower = items.map { $0.lowercased() }
+        guard lower.count > 1 else { return lower.first ?? "" }
+        return lower.dropLast().joined(separator: ", ") + " and " + lower.last!
     }
 
     // MARK: Steps
@@ -130,7 +155,7 @@ struct WizardView: View {
         switch step {
         case .meals:
             VStack(alignment: .leading, spacing: 28) {
-                StepHeader(food: .basket,
+                StepHeader(art: Food.basket.image,
                            title: "How many meals are you prepping?",
                            subtitle: "Count every lunch and dinner you want ready in the fridge.")
                 Counter(label: "Meals", value: $draft.meals, range: 2...21, unit: "meals")
@@ -140,9 +165,8 @@ struct WizardView: View {
 
         case .diet:
             VStack(alignment: .leading, spacing: 28) {
-                StepHeader(food: nil,
-                           title: "What's your eating style?",
-                           subtitle: "Pick the one that fits best.")
+                StepHeader(art: nil,
+                           title: "What's your eating style?")
                 LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
                     ForEach(DietOption.all) { option in
                         OptionTile(food: option.food, title: option.name, subtitle: option.blurb,
@@ -155,25 +179,29 @@ struct WizardView: View {
 
         case .hunger:
             VStack(alignment: .leading, spacing: 28) {
-                StepHeader(food: .salmon,
+                StepHeader(art: Illustration.portion(kcal: draft.kcalPerMeal).image,
                            title: "How big is one meal?",
-                           subtitle: "Per person. A typical lunch is 500 to 700 kcal.")
+                           subtitle: draft.diet == "High protein"
+                               ? "Per person. High protein starts at \(draft.dietOption.proteinRange.lowerBound) g a meal."
+                               : "Per person. A typical lunch is 500 to 700 kcal.")
                 Counter(label: "Energy", value: $draft.kcalPerMeal, range: 300...1200, step: 50, unit: "kcal", compact: true)
-                Counter(label: "Protein", value: $draft.proteinPerMeal, range: 10...90, step: 5, unit: "grams", compact: true)
+                Counter(label: "Protein", value: $draft.proteinPerMeal, range: draft.dietOption.proteinRange,
+                        step: 5, unit: "grams", compact: true)
             }
 
         case .base:
             VStack(alignment: .leading, spacing: 28) {
-                StepHeader(food: .chickensoup,
+                StepHeader(art: Food.chickenbreast.image,
                            title: "Pick your base",
-                           subtitle: "How many different proteins and carbs should you cook?")
+                           subtitle: baseSubtitle)
                 Counter(label: "Proteins", value: $draft.proteins, range: 1...4, unit: draft.proteins == 1 ? "protein" : "proteins", compact: true)
-                Counter(label: "Carbs", value: $draft.carbs, range: 1...4, unit: draft.carbs == 1 ? "carb" : "carbs", compact: true)
+                Counter(label: "Carbs", value: $draft.carbs, range: draft.dietOption.carbRange,
+                        unit: draft.carbs == 1 ? "carb" : "carbs", compact: true)
             }
 
         case .color:
             VStack(alignment: .leading, spacing: 28) {
-                StepHeader(food: .broccoli,
+                StepHeader(art: Food.broccoli.image,
                            title: "Add colour and flavour",
                            subtitle: "More of each means more combinations, and a bit more chopping.")
                 Counter(label: "Vegetables", value: $draft.vegetables, range: 1...5, unit: draft.vegetables == 1 ? "vegetable" : "vegetables", compact: true)
@@ -182,12 +210,13 @@ struct WizardView: View {
 
         case .time:
             VStack(alignment: .leading, spacing: 28) {
-                StepHeader(food: .tomatoes,
+                StepHeader(art: Illustration.time.image,
                            title: "How long can you cook?",
-                           subtitle: "One session, start to finish, dishes included.")
+                           subtitle: "\(draft.moduleCount) modules usually take about \(Duration.text((draft.comfortableMinutes + 14) / 15 * 15)).")
                 LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
                     ForEach(TimeOption.all) { option in
-                        TimeTile(option: option, selected: draft.maxPrepMinutes == option.minutes) {
+                        TimeTile(option: option, selected: draft.maxPrepMinutes == option.minutes,
+                                 tightFor: option.minutes < draft.comfortableMinutes ? draft.moduleCount : nil) {
                             withAnimation(.easeOut(duration: 0.15)) { draft.maxPrepMinutes = option.minutes }
                         }
                     }
@@ -196,33 +225,33 @@ struct WizardView: View {
 
         case .avoid:
             VStack(alignment: .leading, spacing: 28) {
-                StepHeader(food: .prawnchips,
+                StepHeader(art: Illustration.avoid.image,
                            title: "Anything to leave out?",
                            subtitle: "Allergies, dislikes, or things you're tired of.")
-                ChipPicker(options: ["Pork", "Beef", "Fish", "Shellfish", "Dairy", "Eggs", "Gluten",
-                                     "Nuts", "Mushrooms", "Spicy", "Coriander", "Olives"],
-                           selection: $draft.avoidTags)
+                if !draft.dietOption.rulesOut.isEmpty {
+                    CoveredNote(text: "\(draft.diet) already leaves out \(Self.list(draft.dietOption.rulesOut)).")
+                }
+                ChipPicker(options: draft.avoidChoices, selection: $draft.avoidTags)
                 InputField(placeholder: "Something else?", text: $draft.avoid)
             }
 
         case .wishes:
             VStack(alignment: .leading, spacing: 28) {
-                StepHeader(food: .oranges,
+                StepHeader(art: Illustration.wishes.image,
                            title: "Any wishes?",
                            subtitle: "Optional: flavours, habits, kitchen limits.")
-                ChipPicker(options: ["Asian flavours", "Mediterranean", "Mexican", "Middle Eastern",
-                                     "Budget-friendly", "Eaten cold at work", "Freezer-friendly",
-                                     "Few dishes", "Kid-friendly"],
-                           selection: $draft.wishTags)
+                ChipPicker(options: draft.wishChoices, selection: $draft.wishTags)
                 InputField(placeholder: "Tell Claude more…", text: $draft.notes)
             }
 
+        case .kitchen:
+            KitchenStep(useKitchen: $useKitchen, photos: $photos) { go(1) }
+
         case .review:
             VStack(alignment: .leading, spacing: 28) {
-                StepHeader(food: .basket,
-                           title: "Ready when you are",
-                           subtitle: "Check your answers. Claude plans the rest in about a minute.")
-                Summary(preferences: draft)
+                StepHeader(art: Illustration.review.image,
+                           title: "Ready when you are")
+                Summary(preferences: draft, kitchenPhotos: useKitchen == true ? photos.count : 0)
             }
         }
     }
@@ -231,23 +260,25 @@ struct WizardView: View {
 // MARK: - Pieces
 
 struct StepHeader: View {
-    let food: Food?
+    let art: Image?
     let title: String
-    let subtitle: String
+    var subtitle: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            if let food {
-                Art(food: food, size: 84, tilt: -6)
+            if let art {
+                Art(image: art, size: 84, tilt: -6)
                     .padding(.bottom, 6)
             }
             TitleText(title, size: 34)
                                 .fixedSize(horizontal: false, vertical: true)
-            Text(subtitle)
-                .font(.sans(16))
-                .foregroundStyle(Theme.secondary)
-                .lineSpacing(3)
-                .fixedSize(horizontal: false, vertical: true)
+            if let subtitle {
+                Text(subtitle)
+                    .font(.sans(16))
+                    .foregroundStyle(Theme.secondary)
+                    .lineSpacing(3)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 }
@@ -343,6 +374,8 @@ private struct TimeOption: Identifiable {
 private struct TimeTile: View {
     let option: TimeOption
     let selected: Bool
+    /// Set when this is short for the number of modules picked.
+    var tightFor: Int?
     let action: () -> Void
 
     var body: some View {
@@ -351,9 +384,9 @@ private struct TimeTile: View {
                 Text(Duration.text(option.minutes))
                     .titleFont(28)
                     .foregroundStyle(Theme.ink)
-                Text(option.note)
+                Text(tightFor.map { "Tight for \($0) modules" } ?? option.note)
                     .font(.sans(13))
-                    .foregroundStyle(Theme.secondary)
+                    .foregroundStyle(tightFor == nil ? Theme.secondary : Theme.tertiary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(16)
@@ -384,8 +417,26 @@ private struct ChipPicker: View {
     }
 }
 
+/// Says what an earlier answer already took care of.
+private struct CoveredNote: View {
+    let text: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "checkmark.circle")
+                .font(.system(size: 14))
+                .foregroundStyle(Theme.success)
+            Text(text)
+                .font(.sans(14))
+                .foregroundStyle(Theme.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
 private struct Summary: View {
     let preferences: Preferences
+    var kitchenPhotos = 0
 
     var body: some View {
         let p = preferences
@@ -398,7 +449,8 @@ private struct Summary: View {
             row("Modules", "\(p.proteins) proteins · \(p.carbs) carbs · \(p.vegetables) veg · \(p.sauces) sauces")
             row("Cooking time", Duration.text(p.maxPrepMinutes))
             row("Leave out", avoid.isEmpty ? "Nothing" : avoid.joined(separator: ", "))
-            row("Wishes", wishes.isEmpty ? "None" : wishes.joined(separator: ", "), last: true)
+            row("Wishes", wishes.isEmpty ? "None" : wishes.joined(separator: ", "))
+            row("Zero waste", kitchenPhotos == 0 ? "Not this round" : "\(kitchenPhotos) kitchen photo\(kitchenPhotos == 1 ? "" : "s")", last: true)
         }
         .padding(.horizontal, 18)
         .card()
@@ -430,11 +482,12 @@ private struct FailedView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             Spacer()
-            Art(food: .tomatocan, size: 96, tilt: -10)
+            Art(Illustration.forError(message, fallback: .planFailed), size: 96, tilt: -10)
             TitleText("Something went wrong", size: 34)
-            Text(message)
+            Text(error: message)
                 .font(.sans(16))
                 .foregroundStyle(Theme.secondary)
+                .tint(Theme.ink)
             Spacer()
             Button("Try again", action: retry)
                 .buttonStyle(PrimaryButtonStyle())

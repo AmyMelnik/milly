@@ -26,17 +26,69 @@ struct DietOption: Identifiable {
     let name: String
     let blurb: String
     let food: Food
+    /// "Leave out" chips this diet already rules out, so they aren't offered again.
+    var rulesOut: [String] = []
+    /// Wish chips that would only repeat the diet.
+    var covers: [String] = []
+    /// How many carbs the "Pick your base" step offers.
+    var carbRange: ClosedRange<Int> = 1...4
+    /// Grams of protein per meal the "How big" step offers.
+    var proteinRange: ClosedRange<Int> = 10...90
     var id: String { name }
+
+    private static let meat = ["Pork", "Beef", "Chicken", "Lamb"]
+    private static let seafood = ["Fish", "Shellfish"]
 
     static let all: [DietOption] = [
         DietOption(name: "No restrictions", blurb: "A bit of everything", food: .basket),
-        DietOption(name: "High protein", blurb: "Lean & filling", food: .chickensoup),
-        DietOption(name: "Vegetarian", blurb: "No meat or fish", food: .butter),
-        DietOption(name: "Vegan", blurb: "Fully plant-based", food: .broccoli),
-        DietOption(name: "Pescatarian", blurb: "Fish, no meat", food: .salmon),
-        DietOption(name: "Low carb", blurb: "Easy on the grains", food: .tomatoes),
-        DietOption(name: "Mediterranean", blurb: "Olive oil & lemon", food: .oranges),
+        DietOption(name: "High protein", blurb: "Lean & filling", food: .chickenbreast, proteinRange: 30...90),
+        DietOption(name: "Vegetarian", blurb: "No meat or fish", food: .cheese, rulesOut: meat + seafood),
+        DietOption(name: "Vegan", blurb: "Fully plant-based", food: .tofu, rulesOut: meat + seafood + ["Dairy", "Eggs"]),
+        DietOption(name: "Pescatarian", blurb: "Fish, no meat", food: .salmon, rulesOut: meat),
+        DietOption(name: "Low carb", blurb: "Easy on the grains", food: .lowcarb, carbRange: 0...2),
+        DietOption(name: "Mediterranean", blurb: "Olive oil & lemon", food: .oliveoil, covers: ["Mediterranean"]),
     ]
+
+    static func named(_ name: String) -> DietOption {
+        all.first { $0.name == name } ?? all[0]
+    }
+}
+
+/// Chips on the "Anything to leave out?" step.
+enum AvoidOption {
+    static let all = ["Pork", "Beef", "Chicken", "Lamb", "Fish", "Shellfish", "Dairy", "Eggs", "Gluten", "Soy",
+                      "Nuts", "Mushrooms", "Spicy", "Coriander", "Olives"]
+}
+
+/// Chips on the "Any wishes?" step.
+enum WishOption {
+    static let all = ["Asian flavours", "Mediterranean", "Mexican", "Middle Eastern", "Budget-friendly",
+                      "Eaten cold at work", "Freezer-friendly", "Few dishes", "Kid-friendly"]
+}
+
+extension Preferences {
+    var dietOption: DietOption { DietOption.named(diet) }
+
+    /// Leave-out chips still worth asking about with this diet.
+    var avoidChoices: [String] { AvoidOption.all.filter { !dietOption.rulesOut.contains($0) } }
+    /// Wish chips that add something beyond the diet.
+    var wishChoices: [String] { WishOption.all.filter { !dietOption.covers.contains($0) } }
+
+    /// Brings later answers in line with the diet: drops chips it already covers
+    /// and keeps counts inside what it allows.
+    mutating func applyDietRules() {
+        let option = dietOption
+        avoidTags.removeAll { option.rulesOut.contains($0) }
+        wishTags.removeAll { option.covers.contains($0) }
+        carbs = min(option.carbRange.upperBound, max(option.carbRange.lowerBound, carbs))
+        proteinPerMeal = min(option.proteinRange.upperBound, max(option.proteinRange.lowerBound, proteinPerMeal))
+    }
+
+    /// Batch-cooked modules in total.
+    var moduleCount: Int { proteins + carbs + vegetables + sauces }
+
+    /// A rough floor for cooking this many modules in one go, dishes included.
+    var comfortableMinutes: Int { 25 + moduleCount * 7 }
 }
 
 // MARK: - What Claude returns (mirrors PlanSchema)
@@ -57,10 +109,10 @@ enum ComponentCategory: String, Codable, CaseIterable, Hashable {
     var fallbackFood: Food {
         switch self {
         case .protein: .salmon
-        case .carb: .cereal
+        case .carb: .rice
         case .vegetable: .broccoli
-        case .sauce: .mayo
-        case .topping: .prawnchips
+        case .sauce: .sauce
+        case .topping: .nuts
         }
     }
 }
@@ -141,6 +193,8 @@ struct GeneratedPlan: Codable, Hashable {
     var combinations: [Combination]
     var cookingSteps: [CookingStep]
     var groceries: [GroceryItem]
+    /// Zero-waste mode: what Claude spotted in the kitchen photos and used.
+    var fromKitchen: [String]?
 
     func component(_ id: String) -> PrepComponent? {
         components.first { $0.id == id }
@@ -175,6 +229,10 @@ struct SavedPlan: Codable, Identifiable, Hashable {
     var groceryEdits: [String]?
     /// When groceries from this plan were last added to the Picnic cart.
     var orderedAt: Date?
+    /// When the cook starred this plan as one to repeat. Nil if it isn't a favourite.
+    var favoritedAt: Date?
+
+    var isFavorite: Bool { favoritedAt != nil }
 }
 
 enum Duration {

@@ -1,0 +1,12 @@
+{
+  "images" : [
+    {
+      "filename" : "oats.png",
+      "idiom" : "universal"
+    }
+  ],
+  "info" : {
+    "author" : "xcode",
+    "version" : 1
+  }
+}
