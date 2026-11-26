@@ -29,9 +29,22 @@ struct DebugPreviewOverlay: View {
             (.combinations, 0.5, "3 meal ideas so far"),
             (.cooking, 0.7, "Step 4 of the session"),
             (.groceries, 0.88, "11 items on the list"),
+            (.finishing, 1, "Almost ready"),
         ]
+        // -PreviewUpload starts with the kitchen photo upload step.
+        let withPhotos = args.contains("-PreviewUpload")
+        if withPhotos {
+            store.progress = .preparingPhotos(4)
+            try? await Task.sleep(for: .seconds(1))
+            let total: Int64 = 4_200_000
+            for sent in stride(from: Int64(0), through: total, by: 600_000) {
+                store.progress = .uploading(4, sent: sent, total: total)
+                try? await Task.sleep(for: .seconds(args.contains("-PreviewHold") ? 1000 : 0.5))
+            }
+        }
         for step in steps {
-            store.progress = PlanProgress(stage: step.0, fraction: step.1, detail: step.2)
+            store.progress = PlanProgress(stage: step.0, fraction: max(step.1, withPhotos ? PlanProgress.uploadShare : 0),
+                                          detail: step.2, withPhotos: withPhotos)
             try? await Task.sleep(for: .seconds(args.contains("-PreviewHold") ? 1000 : 2.5))
         }
     }

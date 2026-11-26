@@ -1,0 +1,12 @@
+{
+  "images" : [
+    {
+      "filename" : "state-no-plans.png",
+      "idiom" : "universal"
+    }
+  ],
+  "info" : {
+    "author" : "xcode",
+    "version" : 1
+  }
+}

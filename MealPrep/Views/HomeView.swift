@@ -12,7 +12,9 @@ struct HomeView: View {
     @State private var deleting: SavedPlan?
 
     private var featured: SavedPlan? { store.featuredPlan }
-    private var history: [SavedPlan] { store.plans.filter { $0.id != featured?.id } }
+    /// Starred plans to repeat, except the one already featured at the top.
+    private var favorites: [SavedPlan] { store.favorites.filter { $0.id != featured?.id } }
+    private var history: [SavedPlan] { store.plans.filter { $0.id != featured?.id && !$0.isFavorite } }
 
     var body: some View {
         PageScroll {
@@ -34,29 +36,17 @@ struct HomeView: View {
 
                 if let featured {
                     LatestPlanCard(saved: featured) { onOpen(featured.id) }
+                        .overlay(alignment: .topTrailing) {
+                            FavoriteButton(saved: featured, filled: true).padding(8)
+                        }
+                }
+
+                if !favorites.isEmpty {
+                    planList("Favourites", favorites, art: .favourite)
                 }
 
                 if !history.isEmpty {
-                    VStack(alignment: .leading, spacing: 12) {
-                        HStack(alignment: .firstTextBaseline) {
-                            TitleText("Other plans", size: 26)
-                            Spacer()
-                            Text("\(history.count)").font(.sans(14)).foregroundStyle(Theme.tertiary)
-                        }
-                        VStack(spacing: 0) {
-                            ForEach(Array(history.enumerated()), id: \.element.id) { index, saved in
-                                if index > 0 { Hairline() }
-                                HistoryRow(saved: saved) { onOpen(saved.id) }
-                                    .contextMenu {
-                                        Button("Delete plan", systemImage: "trash", role: .destructive) { deleting = saved }
-                                    }
-                            }
-                        }
-                        .padding(.horizontal, 16)
-                        .card()
-                        Text("Press and hold a plan to delete it.")
-                            .font(.sans(12)).foregroundStyle(Theme.tertiary)
-                    }
+                    planList("Other plans", history, art: .savedPlans)
                 }
             }
             .padding(.horizontal, 22)
@@ -94,6 +84,33 @@ struct HomeView: View {
         }
     }
 
+    private func planList(_ title: String, _ plans: [SavedPlan], art: Illustration) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .center, spacing: 8) {
+                Art(art, size: 36, tilt: -6)
+                TitleText(title, size: 26)
+                Spacer()
+                Text("\(plans.count)").font(.sans(14)).foregroundStyle(Theme.tertiary)
+            }
+            VStack(spacing: 0) {
+                ForEach(Array(plans.enumerated()), id: \.element.id) { index, saved in
+                    if index > 0 { Hairline() }
+                    HistoryRow(saved: saved) { onOpen(saved.id) }
+                        .contextMenu {
+                            Button(saved.isFavorite ? "Remove from favourites" : "Add to favourites",
+                                   systemImage: saved.isFavorite ? "star.slash" : "star") {
+                                store.toggleFavorite(saved.id)
+                            }
+                            Button("Delete plan", systemImage: "trash", role: .destructive) { deleting = saved }
+                        }
+                }
+            }
+            .padding(.horizontal, 16)
+            .card()
+        }
+        .animation(.easeInOut(duration: 0.25), value: plans.map(\.id))
+    }
+
     private var greeting: String {
         switch Calendar.current.component(.hour, from: .now) {
         case 5..<12: "Good morning"
@@ -111,16 +128,24 @@ private struct LatestPlanCard: View {
 
     private var plan: GeneratedPlan { saved.plan }
 
+    /// The card is wide and short, so the side ingredients are drawn nearly as big as the centrepiece
+    /// and sit closer in. The top-left one is a little lower, clear of the "Last ordered" pill.
+    private static let cardLayout: [ArtCluster.Spot] = [
+        (0.5, 0.52, 0.86, 0),
+        (0.14, 0.40, 0.58, -12), (0.86, 0.28, 0.60, 12),
+        (0.20, 0.86, 0.56, 8), (0.82, 0.82, 0.58, -8),
+    ]
+
     var body: some View {
         Button(action: onOpen) {
             VStack(alignment: .leading, spacing: 0) {
                 ZStack {
                     Theme.cream
-                    ArtCluster(foods: featured)
-                        .padding(.horizontal, 30)
-                        .padding(.vertical, 18)
+                    ArtCluster(foods: featured, layout: Self.cardLayout)
+                        .padding(.horizontal, 24)
+                        .padding(.vertical, 16)
                 }
-                .frame(height: 190)
+                .frame(height: 220)
                 .overlay(alignment: .topLeading) {
                     Pill(text: saved.orderedAt != nil ? "Last ordered" : "Newest plan",
                          systemImage: saved.orderedAt != nil ? "cart.fill" : nil, fill: .white)
@@ -173,7 +198,7 @@ private struct LatestPlanCard: View {
     private var featured: [Food] {
         var foods: [Food] = []
         for c in plan.components where !foods.contains(c.food) { foods.append(c.food) }
-        for f in [Food.basket, .tomatoes, .leeks, .broccoli, .oranges] where foods.count < 5 && !foods.contains(f) {
+        for f in [Food.basket, .tomatoes, .leeks, .broccoli, .lemonlime] where foods.count < 5 && !foods.contains(f) {
             foods.append(f)
         }
         return Array(foods.prefix(5))
@@ -192,12 +217,22 @@ private struct HistoryRow: View {
         return "\(date) · \(saved.plan.components.count) modules" + ordered
     }
 
+    /// One of the plan's own ingredients, picked at random but fixed per plan (seeded by its ID),
+    /// so the list has some variety and each plan keeps its picture between launches.
+    private var thumbnail: Food {
+        var foods: [Food] = []
+        for c in saved.plan.components where !foods.contains(c.food) { foods.append(c.food) }
+        guard !foods.isEmpty else { return .basket }
+        let seed = withUnsafeBytes(of: saved.id.uuid) { $0.reduce(0) { $0 &* 31 &+ Int($1) } }
+        return foods[Int(seed.magnitude % UInt(foods.count))]
+    }
+
     var body: some View {
         Button(action: onOpen) {
             HStack(spacing: 14) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Theme.cream)
-                    Art(food: saved.plan.components.first?.food ?? .basket, size: 38, tilt: -6)
+                    Art(food: thumbnail, size: 38, tilt: -6)
                 }
                 .frame(width: 54, height: 54)
                 VStack(alignment: .leading, spacing: 3) {
@@ -212,6 +247,8 @@ private struct HistoryRow: View {
                         .lineLimit(1)
                 }
                 Spacer(minLength: 4)
+                // Room for the star, which sits over the row so it isn't part of the open button.
+                Color.clear.frame(width: 36, height: 1)
                 Image(systemName: "chevron.right")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(Theme.tertiary)
@@ -220,6 +257,35 @@ private struct HistoryRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .overlay(alignment: .trailing) {
+            FavoriteButton(saved: saved).padding(.trailing, 14)
+        }
+    }
+}
+
+// MARK: - Favourite star
+
+/// Stars or un-stars a plan. `filled` draws it on a white circle, for use over artwork.
+struct FavoriteButton: View {
+    @Environment(AppStore.self) private var store
+    let saved: SavedPlan
+    var filled = false
+
+    var body: some View {
+        Button {
+            store.toggleFavorite(saved.id)
+        } label: {
+            Image(systemName: saved.isFavorite ? "star.fill" : "star")
+                .font(.system(size: filled ? 15 : 16, weight: .medium))
+                .foregroundStyle(saved.isFavorite ? Theme.accent : Theme.tertiary)
+                .frame(width: filled ? 34 : 36, height: filled ? 34 : 44)
+                .background { if filled { Circle().fill(.white) } }
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .sensoryFeedback(.selection, trigger: saved.isFavorite)
+        .accessibilityLabel(saved.isFavorite ? "Remove from favourites" : "Add to favourites")
     }
 }
 

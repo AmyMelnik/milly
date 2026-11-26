@@ -12,8 +12,8 @@ struct ShopView: View {
             if !store.picnic.isLoggedIn {
                 PageScroll {
                     VStack(alignment: .leading, spacing: 20) {
-                        StepIntro(food: .basket, eyebrow: "Picnic", title: "Log in to order",
-                                  text: "Log in once and your groceries go straight into your Picnic cart.")
+                        StepIntro(art: (login.codeSent ? Illustration.codeSent : .picnicLogin).image, eyebrow: "Picnic", title: "Log in to order",
+                                  text: "Your groceries go straight into your Picnic cart.")
                         PicnicLoginFields(model: login)
                         SecurityNote(text: "Your password goes straight to Picnic and is never saved. Only Picnic's session is kept, in the Keychain.")
                     }
@@ -79,16 +79,13 @@ struct ShoppingListView: View {
                         TitleText("Fill your cart", size: 36)
                     }
                     Spacer()
-                    Art(food: .basket, size: 84, tilt: 6)
+                    Art(image: headerArt, size: 84, tilt: 6)
                 }
-                Text("Find products, check the picks, then add them all. Tap a product to swap it. You check out in the Picnic app.")
-                    .font(.sans(15))
-                    .foregroundStyle(Theme.secondary)
-                    .lineSpacing(3)
-                    .fixedSize(horizontal: false, vertical: true)
-
                 if let error = shopping.errorMessage {
-                    Text(error)
+                    HStack(spacing: 12) {
+                        if Illustration.isOffline(error) { Art(.offline, size: 44, tilt: -6) }
+                        Text(error)
+                    }
                         .font(.sans(14))
                         .foregroundStyle(Theme.accent)
                         .padding(14)
@@ -122,6 +119,15 @@ struct ShoppingListView: View {
         .sheet(item: $picking) { ref in
             ProductPickerView(lineID: ref.id)
         }
+    }
+
+    /// The basket until something is in the cart, then how the order is going.
+    private var headerArt: Image {
+        let lines = store.shopping.includedLines
+        guard lines.contains(where: { $0.status == .added }) else { return Food.basket.image }
+        if lines.contains(where: { $0.status == .noMatch }) { return Illustration.cartPartial.image }
+        if lines.allSatisfy({ $0.status == .added }) { return Illustration.checkout.image }
+        return Illustration.cartAdded.image
     }
 
     @ViewBuilder
@@ -261,7 +267,15 @@ private struct CartLineRow: View {
                         Text("Quantity").font(.sans(13)).foregroundStyle(Theme.secondary)
                         Spacer()
                         HStack(spacing: 12) {
-                            CircleIconButton(systemImage: "minus", size: 32) { line.count = max(1, line.count - 1) }
+                            CircleIconButton(systemImage: "minus", size: 32) {
+                                // Below 1 the item stays on the list but is left out of the cart.
+                                if line.count > 1 {
+                                    line.count -= 1
+                                } else {
+                                    withAnimation(.easeOut(duration: 0.15)) { line.include = false }
+                                }
+                            }
+                            .accessibilityLabel(line.count > 1 ? "Fewer" : "Leave out of cart")
                             Text("\(line.count)")
                                 .font(.sans(15, .semibold))
                                 .monospacedDigit()
@@ -339,9 +353,16 @@ struct ProductPickerView: View {
                 if line?.status == .searching {
                     HStack {
                         Spacer()
-                        BasketDrop(basketSize: 90)
+                        Art(.searching, size: 96, tilt: -6)
+                            .phaseAnimator([false, true]) { art, up in
+                                art.offset(y: up ? -4 : 4).rotationEffect(.degrees(up ? 4 : -4))
+                            } animation: { _ in .easeInOut(duration: 0.8) }
                         Spacer()
                     }
+                } else if line?.status == .noMatch && (line?.candidates ?? []).isEmpty {
+                    StateMessage(illustration: .productNotFound, title: "Nothing found",
+                                 text: "Picnic has nothing for “\(term)”. Try a shorter or Dutch name.")
+                        .padding(.top, 8)
                 }
 
                 VStack(spacing: 0) {
@@ -542,14 +563,14 @@ struct SettingsSheet: View {
         NavigationStack {
             PageScroll {
                 VStack(alignment: .leading, spacing: 18) {
-                    section(title: "Claude", food: .soysauce) {
+                    section(title: "Claude", art: Food.soysauce.image) {
                         Label(store.hasAnthropicKey ? "API key saved on this iPhone" : "No API key",
                               systemImage: store.hasAnthropicKey ? "checkmark.circle.fill" : "exclamationmark.circle")
                             .font(.sans(14, .semibold))
                             .foregroundStyle(store.hasAnthropicKey ? Theme.success : Theme.accent)
                         InputField(placeholder: "Paste a new key to replace it", text: $key, secure: true)
                         if let keyMessage {
-                            Text(keyMessage).font(.sans(13)).foregroundStyle(Theme.accent)
+                            Text(error: keyMessage).font(.sans(13)).foregroundStyle(Theme.accent).tint(Theme.ink)
                         }
                         HStack(spacing: 10) {
                             Button {
@@ -565,11 +586,11 @@ struct SettingsSheet: View {
                                     .buttonStyle(SecondaryButtonStyle(foreground: Theme.accent))
                             }
                         }
-                        Text("Plans are made with \(ClaudePlanner.model). Each plan or change is one paid request. Removing the key takes you back to setup.")
+                        Text("Plans are made with \(ClaudePlanner.model). Each plan or change is one paid request.")
                             .font(.sans(12)).foregroundStyle(Theme.secondary)
                     }
 
-                    section(title: "Picnic", food: .basket) {
+                    section(title: "Picnic", art: Food.basket.image) {
                         if store.picnic.isLoggedIn {
                             Label("Logged in", systemImage: "checkmark.circle.fill")
                                 .font(.sans(14, .semibold)).foregroundStyle(Theme.success)
@@ -578,14 +599,19 @@ struct SettingsSheet: View {
                         } else {
                             PicnicLoginForm {}
                         }
-                        Text("Picnic has no official API. This uses the same endpoints as the Picnic app, so it may break if Picnic changes them. It only fills your cart; you check out in the Picnic app.")
+                        Text("Picnic has no official API, so ordering may break if Picnic changes its app.")
                             .font(.sans(12)).foregroundStyle(Theme.secondary)
                     }
 
                     SecurityNote(text: "Your Claude key and Picnic session are stored only in this iPhone's Keychain: encrypted, readable only while it's unlocked, never synced or backed up. Your Picnic password is never stored. Saved plans are encrypted while the phone is locked.")
 
-                    if !store.plans.isEmpty {
-                        section(title: "Saved plans", food: .cereal) {
+                    if store.plans.isEmpty {
+                        section(title: "Saved plans", art: Illustration.noPlans.image) {
+                            Text("No saved plans yet. Your plans show up here once you make one.")
+                                .font(.sans(14)).foregroundStyle(Theme.secondary)
+                        }
+                    } else {
+                        section(title: "Saved plans", art: Illustration.savedPlans.image) {
                             ForEach(store.plans) { plan in
                                 HStack {
                                     VStack(alignment: .leading, spacing: 1) {
@@ -637,10 +663,10 @@ struct SettingsSheet: View {
         }
     }
 
-    private func section<Content: View>(title: String, food: Food, @ViewBuilder content: () -> Content) -> some View {
+    private func section<Content: View>(title: String, art: Image, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 10) {
-                Art(food: food, size: 40, tilt: -6)
+                Art(image: art, size: 40, tilt: -6)
                 TitleText(title, size: 24)
             }
             content()

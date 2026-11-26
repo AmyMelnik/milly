@@ -2,6 +2,7 @@ import SwiftUI
 
 struct PlanView: View {
     @Environment(AppStore.self) private var store
+    @Environment(\.openURL) private var openURL
     let planID: UUID
 
     enum Tab: String, CaseIterable {
@@ -22,7 +23,7 @@ struct PlanView: View {
             if let saved = store.plan(planID) {
                 content(saved)
             } else {
-                ContentUnavailableView("This plan was deleted", systemImage: "trash")
+                StateMessage(illustration: .planDeleted, title: "This plan was deleted")
             }
             if store.isRevising {
                 ZStack {
@@ -35,6 +36,18 @@ struct PlanView: View {
         .animation(.default, value: store.isRevising)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            if let saved = store.plan(planID) {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        store.toggleFavorite(planID)
+                    } label: {
+                        Image(systemName: saved.isFavorite ? "star.fill" : "star")
+                            .foregroundStyle(saved.isFavorite ? Theme.accent : Theme.ink)
+                    }
+                    .sensoryFeedback(.selection, trigger: saved.isFavorite)
+                    .accessibilityLabel(saved.isFavorite ? "Remove from favourites" : "Add to favourites")
+                }
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
                     Button("Change something", systemImage: "wand.and.stars") { showingTweak = true }
@@ -55,6 +68,9 @@ struct PlanView: View {
             "Couldn't update the plan",
             isPresented: Binding(get: { store.errorMessage != nil }, set: { if !$0 { store.errorMessage = nil } })
         ) {
+            if ClaudePlanner.isInvalidKeyMessage(store.errorMessage ?? "") {
+                Button("API key settings") { openURL(ClaudePlanner.keysURL) }
+            }
             Button("OK", role: .cancel) {}
         } message: {
             Text(store.errorMessage ?? "")
@@ -102,12 +118,11 @@ struct PlanView: View {
                 }
             }
             TitleText(plan.title, size: 36)
-                                .fixedSize(horizontal: false, vertical: true)
-            Text(plan.summary)
-                .font(.sans(16))
-                .foregroundStyle(Theme.secondary)
-                .lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)
+            if let kitchen = plan.fromKitchen, !kitchen.isEmpty {
+                Pill(text: "Zero waste · uses \(kitchen.count) thing\(kitchen.count == 1 ? "" : "s") you have",
+                     systemImage: "leaf", fill: Theme.success.opacity(0.12), foreground: Theme.success)
+            }
             HStack(spacing: 0) {
                 Stat(value: "\(plan.components.count)", label: "modules")
                 Divider().frame(height: 34)
@@ -199,7 +214,7 @@ private struct CombosSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
-            SectionTitle(title: "Your prep", subtitle: "Cook these once. Tap ↻ on any module to see alternatives.")
+            SectionTitle(title: "Your prep")
 
             ForEach(ComponentCategory.allCases, id: \.self) { category in
                 let items = plan.components.filter { $0.category == category }
@@ -218,7 +233,7 @@ private struct CombosSection: View {
 
             MixBanner(plan: plan)
 
-            SectionTitle(title: "Suggested combos", subtitle: "Favourite ways to put it together.")
+            SectionTitle(title: "Suggested combos")
             ForEach(plan.combinations) { combo in
                 ComboCard(combo: combo, plan: plan)
             }
@@ -333,8 +348,7 @@ private struct CookingSection: View {
     var body: some View {
         let steps = plan.orderedSteps
         VStack(alignment: .leading, spacing: 22) {
-            SectionTitle(title: "One session, \(Duration.text(plan.totalMinutes))",
-                         subtitle: "Follow the clock. Steps that start together run side by side.")
+            SectionTitle(title: "One session, \(Duration.text(plan.totalMinutes))")
 
             VStack(spacing: 0) {
                 ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
@@ -390,7 +404,7 @@ private struct TimelineRow: View {
                     .lineSpacing(3)
                     .fixedSize(horizontal: false, vertical: true)
                 FlowLayout(spacing: 6) {
-                    Pill(text: step.station.label, systemImage: step.station.symbol)
+                    Pill(text: step.station.label, art: step.station.image)
                     Pill(text: "\(step.minutes) min", systemImage: "timer")
                     ForEach(step.componentIds.compactMap(plan.component)) { component in
                         HStack(spacing: 4) {
@@ -429,7 +443,11 @@ private struct GroceriesSection: View {
         let sections = plan.groceries.reduce(into: [String]()) { if !$0.contains($1.section) { $0.append($1.section) } }
         VStack(alignment: .leading, spacing: 22) {
             SectionTitle(title: "Shopping list",
-                         subtitle: "\(plan.groceries.count) items. Tap one to edit it, or ↻ for alternatives.")
+                         subtitle: "\(plan.groceries.count) items")
+
+            if let kitchen = plan.fromKitchen, !kitchen.isEmpty {
+                FromKitchenCard(items: kitchen)
+            }
 
             if !edits.isEmpty {
                 VStack(alignment: .leading, spacing: 12) {
@@ -442,7 +460,7 @@ private struct GroceriesSection: View {
                     Text(edits.map { $0.prefix(1).uppercased() + $0.dropFirst() }.joined(separator: "\n"))
                         .font(.sans(13))
                         .foregroundStyle(Theme.secondary)
-                    Text("The recipes and combos still use the old list. Let Claude update them to match?")
+                    Text("Update the recipes and combos to match?")
                         .font(.sans(13))
                         .foregroundStyle(Theme.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -490,13 +508,8 @@ private struct GroceriesSection: View {
 
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 12) {
-                    Art(food: .cereal, size: 44, tilt: -8)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Not feeling it?").font(.sans(15, .semibold)).foregroundStyle(Theme.ink)
-                        Text("Get a completely new plan from the same answers.")
-                            .font(.sans(13)).foregroundStyle(Theme.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
+                    Art(food: .pasta, size: 44, tilt: -8)
+                    Text("Not feeling it?").font(.sans(15, .semibold)).foregroundStyle(Theme.ink)
                 }
                 Button("Make a new plan") { confirmRegenerate = true }
                     .buttonStyle(SecondaryButtonStyle())
@@ -507,11 +520,7 @@ private struct GroceriesSection: View {
         .sheet(item: $editing) { item in
             GroceryEditSheet(planID: planID, item: item)
         }
-        .confirmationDialog("Replace this plan with a new one?", isPresented: $confirmRegenerate, titleVisibility: .visible) {
-            Button("Make a new plan") { Task { await store.regenerate(planID) } }
-        } message: {
-            Text("Claude starts fresh with your same answers. This plan and its groceries are replaced.")
-        }
+        .sheet(isPresented: $confirmRegenerate) { NewPlanSheet(planID: planID) }
     }
 }
 
@@ -546,10 +555,7 @@ private struct GroceryEditSheet: View {
                     InputField(placeholder: "e.g. 500 g", text: $amount, plain: true)
                 }
                 Toggle(isOn: $haveIt) {
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("I already have this").font(.sans(15, .semibold)).foregroundStyle(Theme.ink)
-                        Text("It won't be added to your Picnic cart.").font(.sans(12)).foregroundStyle(Theme.secondary)
-                    }
+                    Text("I already have this").font(.sans(15, .semibold)).foregroundStyle(Theme.ink)
                 }
                 .tint(Theme.ink)
                 .padding(14)
@@ -588,8 +594,6 @@ private struct GroceryEditSheet: View {
                 store.removeGrocery(planID, item.id)
                 dismiss()
             }
-        } message: {
-            Text("You can then let Claude update the recipes to match.")
         }
     }
 }
@@ -633,6 +637,53 @@ enum RecipeText {
     }
 }
 
+// MARK: - New plan
+
+/// "Not feeling it?": what the cook didn't like, so the next plan avoids it.
+private struct NewPlanSheet: View {
+    @Environment(AppStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
+    let planID: UUID
+    @State private var reasons: [String] = []
+    @State private var text = ""
+
+    private let ideas = ["Too repetitive", "Don't like the flavours", "Too much cooking", "Too expensive",
+                         "Too heavy", "Too bland", "Not filling enough", "Ingredients I don't like"]
+
+    private var feedback: String {
+        let typed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (reasons + (typed.isEmpty ? [] : [typed])).joined(separator: "; ")
+    }
+
+    var body: some View {
+        PageScroll {
+            VStack(alignment: .leading, spacing: 22) {
+                StepHeader(art: Illustration.planFailed.image,
+                           title: "What didn't you like?",
+                           subtitle: "The new plan will steer clear of it. This plan and its groceries are replaced.")
+                FlowLayout(spacing: 8) {
+                    ForEach(ideas, id: \.self) { idea in
+                        Chip(text: idea, selected: reasons.contains(idea)) {
+                            if let index = reasons.firstIndex(of: idea) { reasons.remove(at: index) } else { reasons.append(idea) }
+                        }
+                    }
+                }
+                InputField(placeholder: "For example: no more chickpeas", text: $text)
+                Button("Make a new plan") {
+                    let feedback = feedback
+                    dismiss()
+                    Task { await store.regenerate(planID, feedback: feedback) }
+                }
+                .buttonStyle(PrimaryButtonStyle())
+            }
+            .padding(24)
+        }
+        .pageBackground()
+        .presentationDetents([.large])
+        .presentationDragIndicator(.visible)
+    }
+}
+
 // MARK: - Tweak
 
 private struct TweakSheet: View {
@@ -646,9 +697,8 @@ private struct TweakSheet: View {
     var body: some View {
         PageScroll {
             VStack(alignment: .leading, spacing: 22) {
-                StepHeader(food: .vegemite,
-                           title: "Change something?",
-                           subtitle: "Claude keeps the rest of the plan and updates whatever is affected.")
+                StepHeader(art: Illustration.tweak.image,
+                           title: "Change something?")
                 FlowLayout(spacing: 8) {
                     ForEach(ideas, id: \.self) { idea in
                         Chip(text: idea, selected: text == idea) { text = idea }
@@ -739,14 +789,17 @@ private struct AlternativesSheet: View {
 
                     if loading {
                         VStack(spacing: 6) {
-                            BasketDrop(basketSize: 110)
+                            Art(.swap, size: 110, tilt: -4)
+                                .phaseAnimator([false, true]) { art, flip in
+                                    art.rotationEffect(.degrees(flip ? 6 : -6))
+                                } animation: { _ in .easeInOut(duration: 0.9) }
                             Text("Finding alternatives that fit your plan…")
                                 .font(.sans(14)).foregroundStyle(Theme.secondary)
                         }
                         .frame(maxWidth: .infinity)
                         .padding(.top, 8)
                     } else if let error {
-                        Text(error).font(.sans(14)).foregroundStyle(Theme.accent)
+                        Text(error: error).font(.sans(14)).foregroundStyle(Theme.accent).tint(Theme.ink)
                         Button("Try again") { load() }.buttonStyle(SecondaryButtonStyle())
                     } else {
                         VStack(spacing: 10) {
@@ -798,8 +851,6 @@ private struct AlternativesSheet: View {
                 .buttonStyle(PrimaryButtonStyle())
                 .disabled(selected == nil)
                 .opacity(selected == nil ? 0.4 : 1)
-                Text("Claude then updates the recipes, combos and shopping list.")
-                    .font(.sans(12)).foregroundStyle(Theme.tertiary)
             }
             .padding(.horizontal, 22)
             .padding(.top, 10)
@@ -839,5 +890,33 @@ private struct AlternativesSheet: View {
             }
             loading = false
         }
+    }
+}
+
+/// Zero-waste mode: what the plan uses from the cook's own kitchen.
+private struct FromKitchenCard: View {
+    let items: [String]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                Image(systemName: "leaf").font(.system(size: 16)).foregroundStyle(Theme.success)
+                Text("From your kitchen").font(.sans(15, .semibold)).foregroundStyle(Theme.ink)
+                Spacer()
+                Text("not on the list").font(.sans(12)).foregroundStyle(Theme.tertiary)
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(items, id: \.self) { item in
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Circle().fill(Theme.success).frame(width: 5, height: 5).offset(y: -2)
+                        Text(item).font(.sans(14)).foregroundStyle(Theme.ink)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .card(Theme.success.opacity(0.07), stroke: Theme.success.opacity(0.25))
     }
 }

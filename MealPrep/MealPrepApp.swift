@@ -45,7 +45,7 @@ struct RootView: View {
         .overlay { DebugPreviewOverlay() }
         .onAppear {
             // Simulator previews only: jump straight to the latest plan.
-            if ProcessInfo.processInfo.arguments.contains("-PreviewOpenLastPlan"), let last = store.latestPlan {
+            if ProcessInfo.processInfo.arguments.contains("-PreviewOpenLastPlan"), let last = store.featuredPlan {
                 path = [last.id]
             }
         }
@@ -77,24 +77,24 @@ struct LandingView: View {
     /// Ingredients scattered around the title and button (fractions of the screen).
     private let placements: [Placement] = [
         // Top
-        Placement(food: .cereal, x: 0.15, y: 0.14, tilt: -8),
+        Placement(food: .oats, x: 0.15, y: 0.14, tilt: -8),
         Placement(food: .milk, x: 0.41, y: 0.125, tilt: 10),
         Placement(food: .leeks, x: 0.63, y: 0.135, tilt: 24),
-        Placement(food: .oranges, x: 0.85, y: 0.185, tilt: 0),
-        Placement(food: .vegemite, x: 0.10, y: 0.265, tilt: -10),
+        Placement(food: .lemonlime, x: 0.85, y: 0.185, tilt: 0),
+        Placement(food: .spicejar, x: 0.10, y: 0.265, tilt: -10),
         Placement(food: .soysauce, x: 0.34, y: 0.255, tilt: 8),
         Placement(food: .tomatoes, x: 0.60, y: 0.262, tilt: 0),
         // Sides
-        Placement(food: .cherryripe, x: 0.05, y: 0.50, tilt: -72),
-        Placement(food: .tomatocan, x: 0.95, y: 0.48, tilt: 10),
+        Placement(food: .chocolate, x: 0.05, y: 0.50, tilt: -72),
+        Placement(food: .tomatotin, x: 0.95, y: 0.48, tilt: 10),
         // Bottom
         Placement(food: .salmon, x: 0.15, y: 0.81, tilt: -10),
         Placement(food: .broccoli, x: 0.40, y: 0.855, tilt: 0),
         Placement(food: .basket, x: 0.66, y: 0.835, tilt: 4),
-        Placement(food: .chickensoup, x: 0.08, y: 0.945, tilt: 8),
+        Placement(food: .stock, x: 0.08, y: 0.945, tilt: 8),
         Placement(food: .butter, x: 0.29, y: 0.955, tilt: 14),
-        Placement(food: .mayo, x: 0.52, y: 0.945, tilt: -10),
-        Placement(food: .prawnchips, x: 0.88, y: 0.925, tilt: -14),
+        Placement(food: .sauce, x: 0.52, y: 0.945, tilt: -10),
+        Placement(food: .nuts, x: 0.88, y: 0.925, tilt: -14),
     ]
 
     var body: some View {

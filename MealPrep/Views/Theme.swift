@@ -171,12 +171,18 @@ struct Eyebrow: View {
 struct Pill: View {
     let text: String
     var systemImage: String?
+    /// A small illustration in place of the symbol.
+    var art: Image?
     var fill: Color = Theme.subtle
     var foreground: Color = Theme.ink
 
     var body: some View {
         HStack(spacing: 4) {
-            if let systemImage { Image(systemName: systemImage).font(.system(size: 10, weight: .medium)) }
+            if let art {
+                Art(image: art, size: 18).padding(.leading, -4)
+            } else if let systemImage {
+                Image(systemName: systemImage).font(.system(size: 10, weight: .medium))
+            }
             Text(text).font(.sans(12, .semibold))
         }
         .foregroundStyle(foreground)
@@ -326,20 +332,83 @@ struct FlowLayout: Layout {
     }
 }
 
-/// One of the ingredient illustrations.
+/// One of the ingredient, state or station illustrations.
 struct Art: View {
-    let food: Food
+    let image: Image
     var size: CGFloat = 44
     var tilt: Double = 0
 
+    init(food: Food, size: CGFloat = 44, tilt: Double = 0) {
+        self.init(image: food.image, size: size, tilt: tilt)
+    }
+
+    init(_ illustration: Illustration, size: CGFloat = 44, tilt: Double = 0) {
+        self.init(image: illustration.image, size: size, tilt: tilt)
+    }
+
+    init(station: Station, size: CGFloat = 44, tilt: Double = 0) {
+        self.init(image: station.image, size: size, tilt: tilt)
+    }
+
+    init(image: Image, size: CGFloat = 44, tilt: Double = 0) {
+        self.image = image
+        self.size = size
+        self.tilt = tilt
+    }
+
     var body: some View {
-        food.image
+        image
             .resizable()
             .interpolation(.high)
             .scaledToFit()
             .frame(width: size, height: size)
             .rotationEffect(.degrees(tilt))
             .accessibilityHidden(true)
+    }
+}
+
+extension Text {
+    /// An error message. When Claude rejects the API key, it links to the API key settings
+    /// in the Anthropic console, where the key can be checked or a new one made.
+    init(error message: String) {
+        if ClaudePlanner.isInvalidKeyMessage(message) {
+            self.init("That key wasn't accepted. Check it in your **[API key settings](https://console.anthropic.com/settings/keys)** and try again.")
+        } else {
+            self.init(verbatim: message)
+        }
+    }
+}
+
+/// A centred illustration with a title and a line of text, for empty screens and errors.
+struct StateMessage<Actions: View>: View {
+    let illustration: Illustration
+    let title: String
+    var text: String?
+    @ViewBuilder var actions: Actions
+
+    var body: some View {
+        VStack(spacing: 14) {
+            Art(illustration, size: 120, tilt: -4)
+                .padding(.bottom, 4)
+            TitleText(title, size: 30, alignment: .center)
+                .fixedSize(horizontal: false, vertical: true)
+            if let text {
+                Text(text)
+                    .font(.sans(15))
+                    .foregroundStyle(Theme.secondary)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            actions.padding(.top, 8)
+        }
+        .padding(.horizontal, 32)
+        .frame(maxWidth: .infinity)
+    }
+}
+
+extension StateMessage where Actions == EmptyView {
+    init(illustration: Illustration, title: String, text: String? = nil) {
+        self.init(illustration: illustration, title: title, text: text) { EmptyView() }
     }
 }
 

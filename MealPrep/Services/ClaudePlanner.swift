@@ -9,6 +9,14 @@ struct ClaudePlanner {
 
     static let model = "claude-opus-5-5"
 
+    /// Where people create, check and revoke their API keys.
+    static let keysURL = URL(string: "https://console.anthropic.com/settings/keys")!
+
+    /// Whether an error message shown to the user is the rejected-key one.
+    static func isInvalidKeyMessage(_ message: String) -> Bool {
+        message == PlannerError.invalidKey.errorDescription
+    }
+
     enum PlannerError: LocalizedError {
         case missingKey
         case invalidKey
@@ -50,11 +58,17 @@ struct ClaudePlanner {
         }
     }
 
-    func generate(_ prefs: Preferences, onProgress: @escaping ProgressHandler) async throws -> GeneratedPlan {
+    /// `photos` are JPEGs of the fridge or pantry (zero-waste mode); Claude plans around what's in them.
+    /// `replacing` and `feedback` are set when the cook rejected a plan: the new one should avoid what they disliked.
+    func generate(_ prefs: Preferences, photos: [Data] = [], replacing previous: GeneratedPlan? = nil, feedback: String = "",
+                  onProgress: @escaping ProgressHandler) async throws -> GeneratedPlan {
         let expected = PlanProgress.Expected(
             components: prefs.proteins + prefs.carbs + prefs.vegetables + prefs.sauces,
-            combinations: 7, steps: 8, groceries: 16)
-        return try await send(userText: PlanPrompt.request(for: prefs), expected: expected, onProgress: onProgress)
+            combinations: 7, steps: 8, groceries: 16, photos: photos.count)
+        var text = PlanPrompt.request(for: prefs)
+        if !photos.isEmpty { text += "\n\n" + PlanPrompt.zeroWaste(photoCount: photos.count) }
+        if let previous { text += "\n\n" + PlanPrompt.rejected(previous, feedback: feedback) }
+        return try await send(userText: text, photos: photos, expected: expected, onProgress: onProgress)
     }
 
     /// Modular edit: keep the plan, change only what the instruction asks for.
@@ -163,25 +177,19 @@ struct ClaudePlanner {
 
     // MARK: Streaming request
 
-    private func send(userText: String, expected: PlanProgress.Expected,
+    private func send(userText: String, photos: [Data] = [], expected: PlanProgress.Expected,
                       onProgress: @escaping ProgressHandler) async throws -> GeneratedPlan {
         guard !apiKey.isEmpty else { throw PlannerError.missingKey }
 
-        // Built as ordered JSON so the schema's property order (and so the order Claude
-        // writes the plan in) is title → summary → components → combinations → steps → groceries.
-        let body = JSON.object([
-            ("model", .string(Self.model)),
-            ("max_tokens", .int(32000)),
-            ("stream", .bool(true)),
-            ("system", .string(PlanPrompt.system)),
-            ("messages", .array([.object([("role", .string("user")), ("content", .string(userText))])])),
-            ("output_config", .object([
-                ("effort", .string("medium")),
-                ("format", .object([("type", .string("json_schema")), ("schema", PlanSchema.plan)])),
-            ])),
-            // If a safety classifier declines, the API retries on a fallback model in the same call.
-            ("fallbacks", .string("default")),
-        ])
+        if !photos.isEmpty {
+            await MainActor.run { onProgress(.preparingPhotos(photos.count)) }
+        }
+
+        // Turning photos into base64 JSON is several megabytes of work, so it happens off the main thread
+        // and the loading screen keeps animating.
+        let httpBody = await Task.detached(priority: .userInitiated) {
+            Self.requestBody(userText: userText, photos: photos)
+        }.value
 
         var request = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
         request.httpMethod = "POST"
@@ -190,9 +198,11 @@ struct ClaudePlanner {
         request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
         request.setValue("2026-10-21", forHTTPHeaderField: "anthropic-version")
         request.setValue("server-side-fallback-2026-07-01", forHTTPHeaderField: "anthropic-beta")
-        request.httpBody = Data(body.rendered.utf8)
+        request.httpBody = httpBody
 
-        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        // With photos, the upload takes a few seconds on mobile data: show it as its own step.
+        let upload = photos.isEmpty ? nil : UploadProgress(photoCount: photos.count, onProgress: onProgress)
+        let (bytes, response) = try await URLSession.shared.bytes(for: request, delegate: upload)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard status == 200 else {
             var data = Data()
@@ -279,6 +289,36 @@ struct ClaudePlanner {
         }
     }
 
+    /// The Messages API request as JSON. Built as ordered JSON so the schema's property order (and so the
+    /// order Claude writes the plan in) is title → summary → components → combinations → steps → groceries.
+    private static func requestBody(userText: String, photos: [Data]) -> Data {
+        let body = JSON.object([
+            ("model", .string(model)),
+            ("max_tokens", .int(32000)),
+            ("stream", .bool(true)),
+            ("system", .string(PlanPrompt.system)),
+            ("messages", .array([.object([("role", .string("user")), ("content", .array(
+                photos.map { photo in
+                    JSON.object([
+                        ("type", .string("image")),
+                        ("source", .object([
+                            ("type", .string("base64")),
+                            ("media_type", .string("image/jpeg")),
+                            ("data", .string(photo.base64EncodedString())),
+                        ])),
+                    ])
+                } + [.object([("type", .string("text")), ("text", .string(userText))])]
+            ))])])),
+            ("output_config", .object([
+                ("effort", .string("medium")),
+                ("format", .object([("type", .string("json_schema")), ("schema", PlanSchema.plan)])),
+            ])),
+            // If a safety classifier declines, the API retries on a fallback model in the same call.
+            ("fallbacks", .string("default")),
+        ])
+        return Data(body.rendered.utf8)
+    }
+
     private struct APIErrorBody: Decodable {
         struct Detail: Decodable { let message: String }
         let error: Detail
@@ -290,10 +330,11 @@ struct ClaudePlanner {
 /// What Claude is doing right now, in plain words, plus a 0…1 fraction for the bar.
 struct PlanProgress: Equatable {
     enum Stage: Int, CaseIterable {
-        case thinking, components, combinations, cooking, groceries, finishing
+        case uploading, thinking, components, combinations, cooking, groceries, finishing
 
         var label: String {
             switch self {
+            case .uploading: "Sending your kitchen photos"
             case .thinking: "Reading your answers"
             case .components: "Choosing what to batch-cook"
             case .combinations: "Pairing it into meals"
@@ -309,27 +350,63 @@ struct PlanProgress: Equatable {
         var combinations: Int
         var steps: Int
         var groceries: Int
+        var photos = 0
     }
 
     var stage: Stage = .thinking
     var fraction: Double = 0
     var detail = "Thinking about what works well together"
+    /// Kitchen photos go along with this request, so the loader shows an upload step first.
+    var withPhotos = false
+
+    /// Share of the bar the photo upload takes up.
+    static let uploadShare = 0.12
+
+    /// Shown the moment "Make my plan" is tapped, before the photos are packed up.
+    static func preparingPhotos(_ count: Int) -> PlanProgress {
+        PlanProgress(stage: .uploading, fraction: 0.01,
+                     detail: "Getting your \(count == 1 ? "photo" : "\(count) photos") ready", withPhotos: true)
+    }
+
+    static func uploading(_ count: Int, sent: Int64, total: Int64) -> PlanProgress {
+        let share = total > 0 ? min(1, Double(sent) / Double(total)) : 0
+        let mb = { (bytes: Int64) in String(format: "%.1f", Double(bytes) / 1_000_000) }
+        let detail = share >= 1
+            ? "Photos sent, waiting for Claude"
+            : "Uploading \(count == 1 ? "1 photo" : "\(count) photos") · \(mb(sent)) of \(mb(total)) MB"
+        return PlanProgress(stage: .uploading, fraction: max(0.01, uploadShare * share), detail: detail, withPhotos: true)
+    }
+
+    /// Whether this request starts with the upload step.
+    static func starting(withPhotos photoCount: Int) -> PlanProgress {
+        photoCount > 0 ? preparingPhotos(photoCount) : PlanProgress()
+    }
 
     /// Turns the partial JSON Claude has written so far into a stage and fraction.
     @MainActor
     final class Tracker {
         let expected: Expected
-        private(set) var progress = PlanProgress()
+        private(set) var progress: PlanProgress
         private let started = Date()
+        /// With photos, the bar is already at the end of the upload step.
+        private var base: Double { expected.photos > 0 ? PlanProgress.uploadShare : 0 }
 
-        init(expected: Expected) { self.expected = expected }
+        init(expected: Expected) {
+            self.expected = expected
+            progress = PlanProgress(fraction: expected.photos > 0 ? PlanProgress.uploadShare : 0,
+                                    withPhotos: expected.photos > 0)
+        }
 
         /// Before any text arrives, Claude is thinking; creep slowly towards 15%.
         func tick() {
             guard progress.stage == .thinking else { return }
             let t = Date().timeIntervalSince(started)
-            progress.fraction = 0.15 * (1 - exp(-t / 20))
-            progress.detail = t < 8 ? "Thinking about what works well together" : "Balancing flavours, protein and prep time"
+            progress.fraction = base + (0.17 - base) * (1 - exp(-t / 20))
+            if expected.photos > 0 && t < 14 {
+                progress.detail = t < 7 ? "Looking at your kitchen photos" : "Spotting what needs using up"
+            } else {
+                progress.detail = t < 8 ? "Thinking about what works well together" : "Balancing flavours, protein and prep time"
+            }
         }
 
         func update(text: String) {
@@ -340,7 +417,7 @@ struct PlanProgress: Equatable {
             func ramp(_ from: Double, _ to: Double, _ done: Int, _ total: Int) -> Double {
                 from + (to - from) * min(1, Double(done) / Double(max(1, total)))
             }
-            var p = PlanProgress()
+            var p = PlanProgress(withPhotos: progress.withPhotos)
             if text.contains("\"groceries\"") {
                 let n = count("\"picnicSearchTerm\"", after: "\"groceries\"")
                 p.stage = .groceries
@@ -371,8 +448,27 @@ struct PlanProgress: Equatable {
         }
 
         func finish() {
-            progress = PlanProgress(stage: .finishing, fraction: 1, detail: "Almost ready")
+            progress = PlanProgress(stage: .finishing, fraction: 1, detail: "Almost ready", withPhotos: progress.withPhotos)
         }
+    }
+}
+
+// MARK: - Upload progress
+
+/// Reports how much of the request (mostly kitchen photos) has been sent.
+private final class UploadProgress: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    let photoCount: Int
+    let onProgress: ClaudePlanner.ProgressHandler
+
+    init(photoCount: Int, onProgress: @escaping ClaudePlanner.ProgressHandler) {
+        self.photoCount = photoCount
+        self.onProgress = onProgress
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didSendBodyData bytesSent: Int64,
+                    totalBytesSent: Int64, totalBytesExpectedToSend: Int64) {
+        let progress = PlanProgress.uploading(photoCount, sent: totalBytesSent, total: totalBytesExpectedToSend)
+        Task { @MainActor in onProgress(progress) }
     }
 }
 
@@ -451,8 +547,36 @@ enum PlanPrompt {
     - Set `pantryStaple` to true for things most kitchens already have: oil, salt, pepper, dried herbs and spices, \
     vinegar, soy sauce, stock cubes.
 
+    From your kitchen:
+    - `fromKitchen` lists what the plan uses from the cook's own fridge or pantry photos, \
+    one short line each, e.g. "Half a bag of spinach (use first)". Leave it empty when there are no photos.
+
     Write names and instructions in English.
     """
+
+    /// The cook asked for a new plan instead of this one.
+    static func rejected(_ plan: GeneratedPlan, feedback: String) -> String {
+        let modules = plan.components.map(\.name).joined(separator: ", ")
+        let reason = feedback.trimmingCharacters(in: .whitespacesAndNewlines)
+        var lines = ["The cook asked for a new plan instead of \"\(plan.title)\" (modules: \(modules))."]
+        if reason.isEmpty {
+            lines.append("They didn't say why, so make it clearly different: other proteins, carbs and flavours.")
+        } else {
+            lines.append("What they didn't like about it: \(reason)")
+            lines.append("Fix exactly that in the new plan, and don't reuse what they disliked. Everything else in the request still applies.")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    static func zeroWaste(photoCount: Int) -> String {
+        """
+        Zero-waste mode: the \(photoCount == 1 ? "photo shows" : "\(photoCount) photos show") what's already in the cook's fridge and pantry.
+        - Identify the usable ingredients you can clearly see. Don't guess at things you can't make out.
+        - Build the modules around them as much as the diet and targets allow, using fresh and perishable things first.
+        - List everything you use from the photos in `fromKitchen`, with a hint like "(use first)" for anything that looks close to going off.
+        - In `groceries`, leave out what the cook already has enough of. If they need more, list only the extra amount to buy.
+        """
+    }
 
     static func request(for p: Preferences) -> String {
         var lines = [
@@ -499,6 +623,7 @@ enum PlanSchema {
         object([
             ("title", string),
             ("summary", string),
+            ("fromKitchen", array(string)),
             ("components", array(object([
                 ("id", string),
                 ("name", string),

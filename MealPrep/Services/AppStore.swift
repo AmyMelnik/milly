@@ -27,6 +27,17 @@ final class AppStore {
         plans.filter { $0.orderedAt != nil }.max { $0.orderedAt! < $1.orderedAt! } ?? plans.first
     }
 
+    /// Starred plans, most recently starred first.
+    var favorites: [SavedPlan] {
+        plans.filter(\.isFavorite).sorted { $0.favoritedAt! > $1.favoritedAt! }
+    }
+
+    func toggleFavorite(_ id: UUID) {
+        guard let index = plans.firstIndex(where: { $0.id == id }) else { return }
+        plans[index].favoritedAt = plans[index].isFavorite ? nil : .now
+        save()
+    }
+
     func markOrdered(_ id: UUID) {
         guard let index = plans.firstIndex(where: { $0.id == id }) else { return }
         plans[index].orderedAt = .now
@@ -60,16 +71,20 @@ final class AppStore {
 
     private var planner: ClaudePlanner { ClaudePlanner(apiKey: anthropicKey) }
 
-    private func report(_ p: PlanProgress) { progress = p }
+    private func report(_ p: PlanProgress) {
+        // A late upload callback must not pull the bar back once Claude has started.
+        if p.stage == .uploading, let current = progress, current.stage != .uploading { return }
+        progress = p
+    }
 
     // MARK: Planning
 
     /// Generates a plan from `preferences`, saves it, and returns its id.
-    func generate() async throws -> UUID {
+    func generate(photos: [Data] = []) async throws -> UUID {
         save()
-        progress = PlanProgress()
+        progress = .starting(withPhotos: photos.count)
         defer { progress = nil }
-        let plan = try await planner.generate(preferences) { [weak self] in self?.report($0) }
+        let plan = try await planner.generate(preferences, photos: photos) { [weak self] in self?.report($0) }
         let saved = SavedPlan(preferences: preferences, plan: plan)
         plans.insert(saved, at: 0)
         save()
@@ -85,10 +100,11 @@ final class AppStore {
     }
 
     /// A completely new plan from the same answers, replacing this one.
-    func regenerate(_ id: UUID) async {
+    /// Replaces the plan with a new one; `feedback` says what the cook didn't like about this one.
+    func regenerate(_ id: UUID, feedback: String = "") async {
         guard let saved = plan(id) else { return }
         await run(id) { planner, report in
-            try await planner.generate(saved.preferences, onProgress: report)
+            try await planner.generate(saved.preferences, replacing: saved.plan, feedback: feedback, onProgress: report)
         }
     }
 
